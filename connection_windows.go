@@ -433,8 +433,8 @@ func (conn *opcConnectionImpl) Tags() []string {
 func (conn *opcConnectionImpl) fix() {
 	var err error
 	if !conn.IsConnected() {
+		tags := conn.Tags()
 		for {
-			tags := conn.Tags()
 			conn.AutomationItems.Close()
 			conn.AutomationItems, err = conn.TryConnect(conn.Server, conn.Nodes)
 			if err != nil {

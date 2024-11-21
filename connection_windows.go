@@ -36,11 +36,6 @@ type AutomationObject struct {
 // CreateBrowser returns the OPCBrowser object from the OPCServer.
 // It only works if there is a successful connection.
 func (ao *AutomationObject) CreateBrowser() (*Tree, error) {
-	// check if server is running, if not return error
-	if !ao.IsConnected() {
-		return nil, errors.New("Cannot create browser because we are not connected.")
-	}
-
 	// create browser
 	browser, err := oleutil.CallMethod(ao.object, "CreateBrowser")
 	if err != nil {
@@ -173,7 +168,10 @@ func (ao *AutomationObject) IsConnected() bool {
 		logger.Println("GetProperty call for ServerState failed", err)
 		return false
 	}
-	if stateVt.Value().(int32) != OPCRunning {
+	status := stateVt.Value().(int32)
+	// some OPC server return status OPCNoconfig when no license is available, so we should consider it as connected
+	// some OPC server return status OPCTest when in test mode, so we should consider it as connected
+	if status != OPCRunning || status != OPCNoconfig || status != OPCTest {
 		return false
 	}
 	return true

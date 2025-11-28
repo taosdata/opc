@@ -9,8 +9,16 @@ import (
 	"sync"
 	"time"
 
-	ole "github.com/go-ole/go-ole"
+	"github.com/go-ole/go-ole"
 	"github.com/go-ole/go-ole/oleutil"
+	"github.com/sirupsen/logrus"
+)
+
+const (
+	ReConnectInterval   = 1 * time.Second
+	ReconnectTimes      = 100
+	AddTagRetryTimes    = 100
+	AddTagRetryInterval = 500 * time.Millisecond
 )
 
 func init() {
@@ -31,6 +39,20 @@ func OleRelease() {
 type AutomationObject struct {
 	unknown *ole.IUnknown
 	object  *ole.IDispatch
+	logger  *logrus.Entry
+}
+
+type Tree struct {
+	Name     string
+	Parent   *Tree
+	Branches []*Tree
+	Leaves   []Leaf
+}
+
+// Leaf contains the OPC tag and forms part of the Tree struct for the  OPC browser
+type Leaf struct {
+	Name string
+	Tag  string
 }
 
 // CreateBrowser returns the OPCBrowser object from the OPCServer.
@@ -39,7 +61,8 @@ func (ao *AutomationObject) CreateBrowser() (*Tree, error) {
 	// create browser
 	browser, err := oleutil.CallMethod(ao.object, "CreateBrowser")
 	if err != nil {
-		return nil, errors.New("Failed to create OPCBrowser")
+		ao.logger.Errorf("failed to create Browser, err: %s", err)
+		return nil, fmt.Errorf("failed to create Browser, err: %s", err)
 	}
 
 	// move to root
@@ -47,22 +70,22 @@ func (ao *AutomationObject) CreateBrowser() (*Tree, error) {
 
 	// create tree
 	root := Tree{"root", nil, []*Tree{}, []Leaf{}}
-	buildTree(browser.ToIDispatch(), &root)
+	buildTree(browser.ToIDispatch(), &root, ao.logger)
 
 	return &root, nil
 }
 
 // buildTree runs through the OPCBrowser and creates a tree with the OPC tags
-func buildTree(browser *ole.IDispatch, branch *Tree) {
+func buildTree(browser *ole.IDispatch, branch *Tree, logger *logrus.Entry) {
 	var count int32
 
-	logger.Println("Entering branch:", branch.Name)
+	logger.Tracef("Entering branch: %s", branch.Name)
 
 	// loop through leafs
 	oleutil.MustCallMethod(browser, "ShowLeafs").ToIDispatch()
 	count = oleutil.MustGetProperty(browser, "Count").Value().(int32)
 
-	logger.Println("\tLeafs count:", count)
+	logger.Tracef("Leafs count:%d", count)
 
 	for i := 1; i <= int(count); i++ {
 
@@ -70,8 +93,7 @@ func buildTree(browser *ole.IDispatch, branch *Tree) {
 		tag := oleutil.MustCallMethod(browser, "GetItemID", item).Value()
 
 		l := Leaf{Name: item.(string), Tag: tag.(string)}
-
-		logger.Println("\t", i, l)
+		logger.Tracef("Item index:%d, Leaf name:%s, tag:%s", i, l.Name, l.Tag)
 
 		branch.Leaves = append(branch.Leaves, l)
 	}
@@ -79,14 +101,13 @@ func buildTree(browser *ole.IDispatch, branch *Tree) {
 	// loop through branches
 	oleutil.MustCallMethod(browser, "ShowBranches").ToIDispatch()
 	count = oleutil.MustGetProperty(browser, "Count").Value().(int32)
-
-	logger.Println("\tBranches count:", count)
+	logger.Tracef("Branches count:%d", count)
 
 	for i := 1; i <= int(count); i++ {
 
 		nextName := oleutil.MustCallMethod(browser, "Item", i).Value()
 
-		logger.Println("\t", i, "next branch:", nextName)
+		logger.Tracef("Branch index:%d, next branch name:%s", i, nextName.(string))
 
 		// move down
 		oleutil.MustCallMethod(browser, "MoveDown", nextName)
@@ -94,14 +115,14 @@ func buildTree(browser *ole.IDispatch, branch *Tree) {
 		// recursively populate tree
 		nextBranch := Tree{nextName.(string), branch, []*Tree{}, []Leaf{}}
 		branch.Branches = append(branch.Branches, &nextBranch)
-		buildTree(browser, &nextBranch)
+		buildTree(browser, &nextBranch, logger)
 
 		// move up and set branches again
 		oleutil.MustCallMethod(browser, "MoveUp")
 		oleutil.MustCallMethod(browser, "ShowBranches").ToIDispatch()
 	}
 
-	logger.Println("Exiting branch:", branch.Name)
+	logger.Tracef("Exiting branch:%s", branch.Name)
 
 }
 
@@ -113,36 +134,36 @@ func (ao *AutomationObject) Connect(server string, node string) (*AutomationItem
 	ao.disconnect()
 
 	// try to connect to opc server and check for error
-	logger.Printf("Connecting to %s on node %s\n", server, node)
+	ao.logger.Debugf("Connecting to %s on node %s", server, node)
 	_, err := oleutil.CallMethod(ao.object, "Connect", server, node)
 	if err != nil {
-		logger.Println("Connection failed.")
-		return nil, errors.New("Connection failed")
+		ao.logger.Errorf("connection failed. Error: %s", err)
+		return nil, fmt.Errorf("connection failed. Error: %s", err)
 	}
 
 	// set up opc groups and items
 	opcGroups, err := oleutil.GetProperty(ao.object, "OPCGroups")
 	if err != nil {
-		// logger.Println(err)
-		return nil, errors.New("cannot get OPCGroups property")
+		ao.logger.Errorf("failed to get OPC groups property. Error: %s", err)
+		return nil, fmt.Errorf("failed to get OPC groups property. Error: %s", err)
 	}
 	opcGrp, err := oleutil.CallMethod(opcGroups.ToIDispatch(), "Add")
 	if err != nil {
-		// logger.Println(err)
-		return nil, errors.New("cannot add new OPC Group")
+		ao.logger.Errorf("failed to add OPC group. Error: %s", err)
+		return nil, fmt.Errorf("failed to add OPC group. Error: %s", err)
 	}
 	addItemObject, err := oleutil.GetProperty(opcGrp.ToIDispatch(), "OPCItems")
 	if err != nil {
-		// logger.Println(err)
-		return nil, errors.New("cannot get OPC Items")
+		ao.logger.Errorf("cannot get OPC Items. Error: %s", err)
+		return nil, fmt.Errorf("cannot get OPC Items. Error: %s", err)
 	}
 
 	opcGroups.ToIDispatch().Release()
 	opcGrp.ToIDispatch().Release()
 
-	logger.Println("Connected.")
+	ao.logger.Debug("Connected successfully")
 
-	return NewAutomationItems(addItemObject.ToIDispatch()), nil
+	return NewAutomationItems(addItemObject.ToIDispatch(), ao.logger), nil
 }
 
 // TryConnect loops over the nodes array and tries to connect to any of the servers.
@@ -153,6 +174,7 @@ func (ao *AutomationObject) TryConnect(server string, nodes []string) (*Automati
 		if err == nil {
 			return items, err
 		}
+		ao.logger.Warnf("TryConnect node %s failed. Error: %s", node, err)
 		errResult = errResult + err.Error() + "\n"
 	}
 	return nil, errors.New("TryConnect was not successful: " + errResult)
@@ -165,47 +187,33 @@ func (ao *AutomationObject) IsConnected() bool {
 	}
 	stateVt, err := oleutil.GetProperty(ao.object, "ServerState")
 	if err != nil {
-		logger.Println("GetProperty call for ServerState failed", err)
+		ao.logger.Warnf("GetProperty call for ServerState failed, err:%s", err)
 		return false
 	}
 	status := stateVt.Value().(int32)
 	// some OPC server return status OPCNoconfig when no license is available, so we should consider it as connected
 	// some OPC server return status OPCTest when in test mode, so we should consider it as connected
-	if status != OPCRunning || status != OPCNoconfig || status != OPCTest {
+	ao.logger.Debugf("OPC Server IsConnected status:%d", status)
+	if status != OPCRunning && status != OPCNoconfig && status != OPCTest {
 		return false
 	}
 	return true
 }
 
-// GetOPCServers returns a list of Prog ID on the specified node
-func (ao *AutomationObject) GetOPCServers(node string) []string {
-	progids, err := oleutil.CallMethod(ao.object, "GetOPCServers", node)
-	if err != nil {
-		logger.Println("GetOPCServers call failed.")
-		return []string{}
-	}
-
-	var servers_found []string
-	for _, v := range progids.ToArray().ToStringArray() {
-		if v != "" {
-			servers_found = append(servers_found, v)
-		}
-	}
-	return servers_found
-}
-
 // Disconnect checks if connected to server and if so, it calls 'disconnect'
 func (ao *AutomationObject) disconnect() {
 	if ao.IsConnected() {
+		ao.logger.Debug("Disconnecting from server")
 		_, err := oleutil.CallMethod(ao.object, "Disconnect")
 		if err != nil {
-			logger.Println("Failed to disconnect.")
+			ao.logger.Errorf("Failed to disconnect. Error: %s", err)
 		}
 	}
 }
 
 // Close releases the OLE objects in the AutomationObject.
 func (ao *AutomationObject) Close() {
+	ao.logger.Debugf("Closing AutomationObject")
 	if ao.object != nil {
 		ao.disconnect()
 		ao.object.Release()
@@ -216,34 +224,27 @@ func (ao *AutomationObject) Close() {
 }
 
 // NewAutomationObject connects to the COM object based on available wrappers.
-func NewAutomationObject() *AutomationObject {
-	wrappers := []string{
-		"Graybox.OPC.DAWrapper.1",
-	}
+func NewAutomationObject(logger *logrus.Entry) (*AutomationObject, error) {
+	wrapper := "Graybox.OPC.DAWrapper.1"
 	var err error
 	var unknown *ole.IUnknown
-	for _, wrapper := range wrappers {
-		unknown, err = oleutil.CreateObject(wrapper)
-		if err == nil {
-			logger.Println("Loaded OPC Automation object with wrapper", wrapper)
-			break
-		}
-		logger.Println("Could not load OPC Automation object with wrapper", wrapper)
-	}
+	unknown, err = oleutil.CreateObject(wrapper)
 	if err != nil {
-		return &AutomationObject{}
+		logger.Errorf("Could not load OPC Automation object with wrapper: %s", wrapper)
+		return nil, err
 	}
 
 	opc, err := unknown.QueryInterface(ole.IID_IDispatch)
 	if err != nil {
-		fmt.Println("Could not QueryInterface")
-		return &AutomationObject{}
+		logger.Errorf("could not QueryInterface IDispatch: %s", err)
+		return nil, fmt.Errorf("could not QueryInterface IDispatch: %s", err)
 	}
-	object := AutomationObject{
+	object := &AutomationObject{
 		unknown: unknown,
 		object:  opc,
+		logger:  logger,
 	}
-	return &object
+	return object, nil
 }
 
 // AutomationItems store the OPCItems from OPCGroup and does the bookkeeping
@@ -251,38 +252,44 @@ func NewAutomationObject() *AutomationObject {
 type AutomationItems struct {
 	addItemObject *ole.IDispatch
 	items         map[string]*ole.IDispatch
+	logger        *logrus.Entry
 }
 
 // addSingle adds the tag and returns an error. Client handles are not implemented yet.
 func (ai *AutomationItems) addSingle(tag string) error {
+	ai.logger.Debugf("Adding item tag: %s", tag)
 	clientHandle := int32(1)
 	item, err := oleutil.CallMethod(ai.addItemObject, "AddItem", tag, clientHandle)
 	if err != nil {
-		return errors.New(tag + ":" + err.Error())
+		ai.logger.Errorf("failed to add item tag. tag:%s, Error: %s", tag, err)
+		return fmt.Errorf("failed to add item tag. tag:%s, Error: %s", tag, err)
 	}
+	ai.logger.Debugf("Added item tag: %s", tag)
 	ai.items[tag] = item.ToIDispatch()
 	return nil
 }
 
 // Add accepts a variadic parameters of tags.
 func (ai *AutomationItems) Add(tags ...string) error {
-	var errResult string
+	var errorList []error
 	for _, tag := range tags {
 		err := ai.addSingle(tag)
 		if err != nil {
-			errResult = err.Error() + errResult
+			errorList = append(errorList, fmt.Errorf("failed to add item tag: %s. Error: %s", tag, err))
 		}
 	}
-	if errResult == "" {
+	if len(errorList) == 0 {
 		return nil
 	}
-	return errors.New(errResult)
+	return errors.Join(errorList...)
 }
 
 // Remove removes the tag.
 func (ai *AutomationItems) Remove(tag string) {
+	ai.logger.Debugf("removing item tag: %s", tag)
 	item, ok := ai.items[tag]
 	if ok {
+		ai.logger.Debugf("release item tag: %s", tag)
 		item.Release()
 	}
 	delete(ai.items, tag)
@@ -309,51 +316,39 @@ func (ai *AutomationItems) readFromOpc(opcitem *ole.IDispatch) (Item, error) {
 	q := ole.NewVariant(ole.VT_INT, 0)
 	ts := ole.NewVariant(ole.VT_DATE, 0)
 
-	// read tag from opc server and monitor duration in seconds
-	t := time.Now()
 	_, err := oleutil.CallMethod(opcitem, "Read", OPCCache, &v, &q, &ts)
-	opcReadsDuration.Observe(time.Since(t).Seconds())
 
 	if err != nil {
-		opcReadsCounter.WithLabelValues("failed").Inc()
 		return Item{}, err
 	}
-	opcReadsCounter.WithLabelValues("success").Inc()
 
 	return Item{
 		Value:     v.Value(),
-		Quality:   ensureInt16(q.Value()), // FIX: ensure the quality value is int16
+		Quality:   ensureInt16(q.Value()),
 		Timestamp: ts.Value().(time.Time),
 	}, nil
-}
-
-// writeToOPC writes value to opc tag and return an error
-func (ai *AutomationItems) writeToOpc(opcitem *ole.IDispatch, value interface{}) error {
-	_, err := oleutil.CallMethod(opcitem, "Write", value)
-	if err != nil {
-		// TODO: Prometheus Monitoring
-		// opcWritesCounter.WithLabelValues("failed").Inc()
-		return err
-	}
-	// opcWritesCounter.WithLabelValues("failed").Inc()
-	return nil
 }
 
 // Close closes the OLE objects in AutomationItems.
 func (ai *AutomationItems) Close() {
 	if ai != nil {
 		for key, opcitem := range ai.items {
+			ai.logger.Debugf("releasing item tag: %s", key)
 			opcitem.Release()
 			delete(ai.items, key)
 		}
+		ai.logger.Debugf("releasing addItemObject")
 		ai.addItemObject.Release()
 	}
 }
 
 // NewAutomationItems returns a new AutomationItems instance.
-func NewAutomationItems(opcitems *ole.IDispatch) *AutomationItems {
-	ai := AutomationItems{addItemObject: opcitems, items: make(map[string]*ole.IDispatch)}
-	return &ai
+func NewAutomationItems(opcitems *ole.IDispatch, logger *logrus.Entry) *AutomationItems {
+	return &AutomationItems{
+		addItemObject: opcitems,
+		items:         make(map[string]*ole.IDispatch),
+		logger:        logger,
+	}
 }
 
 // opcRealServer implements the Connection interface.
@@ -365,36 +360,7 @@ type opcConnectionImpl struct {
 	Server string
 	Nodes  []string
 	mu     sync.RWMutex
-}
-
-// ReadItem returns an Item for a specific tag.
-func (conn *opcConnectionImpl) ReadItem(tag string) Item {
-	conn.mu.RLock()
-	defer conn.mu.RUnlock()
-	opcitem, ok := conn.AutomationItems.items[tag]
-	if ok {
-		item, err := conn.AutomationItems.readFromOpc(opcitem)
-		if err == nil {
-			return item
-		}
-		logger.Printf("Cannot read %s: %s. Trying to fix.", tag, err)
-		conn.fix()
-	} else {
-		logger.Printf("Tag %s not found. Add it first before reading it.", tag)
-	}
-	return Item{}
-}
-
-// Write writes a value to the OPC Server.
-func (conn *opcConnectionImpl) Write(tag string, value interface{}) error {
-	conn.mu.Lock()
-	defer conn.mu.Unlock()
-	opcitem, ok := conn.AutomationItems.items[tag]
-	if ok {
-		return conn.AutomationItems.writeToOpc(opcitem, value)
-	}
-	logger.Printf("Tag %s not found. Add it first before writing to it.", tag)
-	return errors.New("No Write performed")
+	logger *logrus.Entry
 }
 
 // Read returns a map of the values of all added tags.
@@ -405,9 +371,9 @@ func (conn *opcConnectionImpl) Read() map[string]Item {
 	for tag, opcitem := range conn.AutomationItems.items {
 		item, err := conn.AutomationItems.readFromOpc(opcitem)
 		if err != nil {
-			logger.Printf("Cannot read %s: %s. Trying to fix.", tag, err)
+			conn.logger.Warnf("Cannot read %s: %s. Trying to fix.", tag, err)
 			conn.fix()
-			break
+			continue
 		}
 		allTags[tag] = item
 	}
@@ -423,7 +389,6 @@ func (conn *opcConnectionImpl) Tags() []string {
 		}
 	}
 	return tags
-
 }
 
 // fix tries to reconnect if connection is lost by creating a new connection
@@ -431,19 +396,53 @@ func (conn *opcConnectionImpl) Tags() []string {
 func (conn *opcConnectionImpl) fix() {
 	var err error
 	if !conn.IsConnected() {
+		conn.logger.Warnf("Connection not established. Trying to reconnect.")
 		tags := conn.Tags()
-		for {
+		reconnected := false
+		reconnectTimes := 0
+		for i := 0; i < ReconnectTimes; i++ {
+			reconnectTimes++
+			conn.logger.Warnf("Reconnection attempt %d/%d", reconnectTimes, ReconnectTimes)
 			conn.AutomationItems.Close()
 			conn.AutomationItems, err = conn.TryConnect(conn.Server, conn.Nodes)
 			if err != nil {
-				logger.Println(err)
-				time.Sleep(100 * time.Millisecond)
+				conn.logger.Warnf("try to reconnect failed: %s, will retry in 1 second", err)
+				time.Sleep(ReConnectInterval)
 				continue
 			}
-			if conn.Add(tags...) == nil {
-				logger.Printf("Added %d tags", len(tags))
-			}
+			conn.logger.Info("Successfully reconnected to server, adding tags back.")
+			conn.reAddTags(tags)
+			conn.logger.Info("readd tags back successful after reconnection.")
+			reconnected = true
 			break
+		}
+		if !reconnected {
+			conn.logger.Panic("Could not reconnect to server, aborting fix.")
+		}
+	}
+}
+
+// reAddTags tries to re-add the tags after reconnection
+func (conn *opcConnectionImpl) reAddTags(tags []string) {
+	for i, tag := range tags {
+		conn.logger.Debugf("Re-adding tag %d/%d: %s", i+1, len(tags), tag)
+		reAddSuccess := false
+		for retryTimes := 0; retryTimes < AddTagRetryTimes; retryTimes++ {
+			err := conn.addSingle(tag)
+			if err != nil {
+				if retryTimes == AddTagRetryTimes-1 {
+					conn.logger.Errorf("Failed to re-add tag %s after %d retries: %s, giving up", tag, retryTimes, err)
+					break
+				}
+				conn.logger.Warnf("Failed to re-add tag %s: %s, retry times:%d, retrying after 500 millseconds", tag, err, retryTimes)
+				time.Sleep(AddTagRetryInterval)
+			} else {
+				reAddSuccess = true
+				break
+			}
+		}
+		if !reAddSuccess {
+			conn.logger.Panic("Could not re-add all tags, aborting fix.")
 		}
 	}
 }
@@ -461,32 +460,44 @@ func (conn *opcConnectionImpl) Close() {
 }
 
 // NewConnection establishes a connection to the OpcServer object.
-func NewConnection(server string, nodes []string, tags []string) (Connection, error) {
-	object := NewAutomationObject()
+func NewConnection(server string, nodes []string, tags []string, logger *logrus.Entry) (Connection, error) {
+	object, err := NewAutomationObject(logger)
+	if err != nil {
+		return nil, err
+	}
 	items, err := object.TryConnect(server, nodes)
 	if err != nil {
-		return &opcConnectionImpl{}, err
+		object.Close()
+		return nil, err
 	}
 	err = items.Add(tags...)
 	if err != nil {
-		return &opcConnectionImpl{}, err
+		items.Close()
+		object.Close()
+		return nil, err
 	}
 	conn := opcConnectionImpl{
 		AutomationObject: object,
 		AutomationItems:  items,
 		Server:           server,
 		Nodes:            nodes,
+		logger:           logger,
 	}
 
 	return &conn, nil
 }
 
 // CreateBrowser creates an opc browser representation
-func CreateBrowser(server string, nodes []string) (*Tree, error) {
-	object := NewAutomationObject()
-	defer object.Close()
-	_, err := object.TryConnect(server, nodes)
+func CreateBrowser(server string, nodes []string, logger *logrus.Entry) (*Tree, error) {
+	object, err := NewAutomationObject(logger)
 	if err != nil {
+		logger.Errorf("Could not create automation object: %s", err)
+		return nil, err
+	}
+	defer object.Close()
+	_, err = object.TryConnect(server, nodes)
+	if err != nil {
+		logger.Errorf("Cannot connect to %s: %s", server, err)
 		return nil, err
 	}
 	return object.CreateBrowser()

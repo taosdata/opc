@@ -13,6 +13,8 @@ import (
 
 var testLogger *logrus.Entry
 
+var connConfig = DefaultConnectionConfig()
+
 func TestMain(m *testing.M) {
 	baseLogger := logrus.New()
 	baseLogger.SetLevel(logrus.DebugLevel)
@@ -57,6 +59,7 @@ func TestNewConnectionNoTags(t *testing.T) {
 		"Graybox.Simulator",
 		[]string{"localhost"},
 		[]string{},
+		connConfig,
 		testLogger,
 	)
 	client.Close()
@@ -67,6 +70,7 @@ func TestNewConnectionWithTags(t *testing.T) {
 		"Graybox.Simulator",
 		[]string{"localhost"},
 		[]string{"numeric.sin.int64", "numeric.saw.float"},
+		connConfig,
 		testLogger,
 	)
 	assert.NoError(t, err)
@@ -78,6 +82,7 @@ func TestNewConnectionWrongServer(t *testing.T) {
 		"Graybox.Simulator.NOTREAL",
 		[]string{"localhost"},
 		[]string{},
+		connConfig,
 		testLogger,
 	)
 	assert.Error(t, err)
@@ -89,6 +94,7 @@ func TestNewConnectionWrongNode(t *testing.T) {
 		"Graybox.Simulator",
 		[]string{"localhost.NOTREAL"},
 		[]string{},
+		connConfig,
 		testLogger,
 	)
 	assert.Error(t, err)
@@ -101,6 +107,7 @@ func TestNewConnectionWrongTags(t *testing.T) {
 		"Graybox.Simulator",
 		[]string{"localhost"},
 		[]string{"numeric.sin.int64.NOTREAL"},
+		connConfig,
 		testLogger,
 	)
 	assert.Error(t, err)
@@ -112,6 +119,7 @@ func TestAddTags(t *testing.T) {
 		"Graybox.Simulator",
 		[]string{"localhost"},
 		[]string{},
+		connConfig,
 		testLogger,
 	)
 	defer client.Close()
@@ -124,6 +132,7 @@ func TestAddWrongTag(t *testing.T) {
 		"Graybox.Simulator",
 		[]string{"localhost"},
 		[]string{},
+		connConfig,
 		testLogger,
 	)
 	defer client.Close()
@@ -136,6 +145,7 @@ func TestRemoveTags(t *testing.T) {
 		"Graybox.Simulator",
 		[]string{"localhost"},
 		[]string{"numeric.sin.int64", "numeric.saw.float"},
+		connConfig,
 		testLogger,
 	)
 	defer client.Close()
@@ -148,6 +158,7 @@ func TestGetTags(t *testing.T) {
 		"Graybox.Simulator",
 		[]string{"localhost"},
 		[]string{},
+		connConfig,
 		testLogger,
 	)
 	defer client.Close()
@@ -206,6 +217,7 @@ func TestOpcRead(t *testing.T) {
 		"Graybox.Simulator",
 		[]string{"localhost"},
 		[]string{"numeric.sin.int64", "numeric.saw.float"},
+		connConfig,
 		testLogger,
 	)
 	defer client.Close()
@@ -266,6 +278,7 @@ func TestReconnect(t *testing.T) {
 		"Graybox.Simulator",
 		[]string{"localhost"},
 		[]string{"numeric.sin.int64", "numeric.saw.float"},
+		connConfig,
 		testLogger,
 	)
 	assert.NoError(t, err)

@@ -15,10 +15,10 @@ import (
 )
 
 const (
-	ReConnectInterval   = 1 * time.Second
-	ReconnectTimes      = 100
-	AddTagRetryTimes    = 100
-	AddTagRetryInterval = 500 * time.Millisecond
+	DefaultReConnectInterval   = 1 * time.Second
+	DefaultReconnectTimes      = 100
+	DefaultAddTagRetryTimes    = 100
+	DefaultAddTagRetryInterval = 500 * time.Millisecond
 )
 
 func init() {
@@ -357,10 +357,14 @@ func NewAutomationItems(opcitems *ole.IDispatch, logger *logrus.Entry) *Automati
 type opcConnectionImpl struct {
 	*AutomationObject
 	*AutomationItems
-	Server string
-	Nodes  []string
-	mu     sync.RWMutex
-	logger *logrus.Entry
+	Server              string
+	Nodes               []string
+	mu                  sync.RWMutex
+	logger              *logrus.Entry
+	reconnectTimes      int
+	addTagRetryTimes    int
+	reconnectInterval   time.Duration
+	addTagRetryInterval time.Duration
 }
 
 // Read returns a map of the values of all added tags.
@@ -400,14 +404,14 @@ func (conn *opcConnectionImpl) fix() {
 		tags := conn.Tags()
 		reconnected := false
 		reconnectTimes := 0
-		for i := 0; i < ReconnectTimes; i++ {
+		for i := 0; i < conn.reconnectTimes; i++ {
 			reconnectTimes++
-			conn.logger.Warnf("Reconnection attempt %d/%d", reconnectTimes, ReconnectTimes)
+			conn.logger.Warnf("Reconnection attempt %d/%d", reconnectTimes, conn.reconnectTimes)
 			conn.AutomationItems.Close()
 			conn.AutomationItems, err = conn.TryConnect(conn.Server, conn.Nodes)
 			if err != nil {
-				conn.logger.Warnf("try to reconnect failed: %s, will retry in 1 second", err)
-				time.Sleep(ReConnectInterval)
+				conn.logger.Warnf("try to reconnect failed: %s, will retry in %d millseconds", err, conn.reconnectInterval.Milliseconds())
+				time.Sleep(conn.reconnectInterval)
 				continue
 			}
 			conn.logger.Info("Successfully reconnected to server, adding tags back.")
@@ -427,15 +431,15 @@ func (conn *opcConnectionImpl) reAddTags(tags []string) {
 	for i, tag := range tags {
 		conn.logger.Debugf("Re-adding tag %d/%d: %s", i+1, len(tags), tag)
 		reAddSuccess := false
-		for retryTimes := 0; retryTimes < AddTagRetryTimes; retryTimes++ {
+		for retryTimes := 0; retryTimes < conn.addTagRetryTimes; retryTimes++ {
 			err := conn.addSingle(tag)
 			if err != nil {
-				if retryTimes == AddTagRetryTimes-1 {
+				if retryTimes == conn.addTagRetryTimes-1 {
 					conn.logger.Errorf("Failed to re-add tag %s after %d retries: %s, giving up", tag, retryTimes, err)
 					break
 				}
-				conn.logger.Warnf("Failed to re-add tag %s: %s, retry times:%d, retrying after 500 millseconds", tag, err, retryTimes)
-				time.Sleep(AddTagRetryInterval)
+				conn.logger.Warnf("Failed to re-add tag %s: %s, retry times:%d, retrying after %d millseconds", tag, err, retryTimes, conn.addTagRetryInterval.Milliseconds())
+				time.Sleep(conn.addTagRetryInterval)
 			} else {
 				reAddSuccess = true
 				break
@@ -459,8 +463,24 @@ func (conn *opcConnectionImpl) Close() {
 	}
 }
 
+type ConnectionConfig struct {
+	ReconnectTimes      int
+	ReconnectInterval   time.Duration
+	AddTagRetryTimes    int
+	AddTagRetryInterval time.Duration
+}
+
+func DefaultConnectionConfig() *ConnectionConfig {
+	return &ConnectionConfig{
+		ReconnectTimes:      DefaultReconnectTimes,
+		ReconnectInterval:   DefaultReConnectInterval,
+		AddTagRetryTimes:    DefaultAddTagRetryTimes,
+		AddTagRetryInterval: DefaultAddTagRetryInterval,
+	}
+}
+
 // NewConnection establishes a connection to the OpcServer object.
-func NewConnection(server string, nodes []string, tags []string, logger *logrus.Entry) (Connection, error) {
+func NewConnection(server string, nodes []string, tags []string, config *ConnectionConfig, logger *logrus.Entry) (Connection, error) {
 	object, err := NewAutomationObject(logger)
 	if err != nil {
 		return nil, err
@@ -477,11 +497,15 @@ func NewConnection(server string, nodes []string, tags []string, logger *logrus.
 		return nil, err
 	}
 	conn := opcConnectionImpl{
-		AutomationObject: object,
-		AutomationItems:  items,
-		Server:           server,
-		Nodes:            nodes,
-		logger:           logger,
+		AutomationObject:    object,
+		AutomationItems:     items,
+		Server:              server,
+		Nodes:               nodes,
+		logger:              logger,
+		reconnectTimes:      config.ReconnectTimes,
+		reconnectInterval:   config.ReconnectInterval,
+		addTagRetryTimes:    config.AddTagRetryTimes,
+		addTagRetryInterval: config.AddTagRetryInterval,
 	}
 
 	return &conn, nil

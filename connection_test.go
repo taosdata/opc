@@ -209,7 +209,7 @@ func TestTags(t *testing.T) {
 
 func TestAutomationItemsClose(t *testing.T) {
 	conn := &opcConnectionImpl{}
-	conn.AutomationItems.Close()
+	conn.Items.Close()
 }
 
 func TestOpcRead(t *testing.T) {

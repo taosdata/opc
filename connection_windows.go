@@ -27,7 +27,7 @@ func init() {
 
 // OleInit initializes OLE.
 func OleInit() {
-	ole.CoInitializeEx(0, 0)
+	_ = ole.CoInitializeEx(0, 0)
 }
 
 // OleRelease realeses OLE resources in opcAutomation.
@@ -129,7 +129,6 @@ func buildTree(browser *ole.IDispatch, branch *Tree, logger *logrus.Entry) {
 // Connect establishes a connection to the OPC Server on node.
 // It returns a reference to AutomationItems and error message.
 func (ao *AutomationObject) Connect(server string, node string) (*AutomationItems, error) {
-
 	// make sure there is not active connection before trying to connect
 	ao.disconnect()
 
@@ -147,23 +146,28 @@ func (ao *AutomationObject) Connect(server string, node string) (*AutomationItem
 		ao.logger.Errorf("failed to get OPC groups property. Error: %s", err)
 		return nil, fmt.Errorf("failed to get OPC groups property. Error: %s", err)
 	}
+	defer func() {
+		opcGroups.ToIDispatch().Release()
+	}()
+
 	opcGrp, err := oleutil.CallMethod(opcGroups.ToIDispatch(), "Add")
 	if err != nil {
 		ao.logger.Errorf("failed to add OPC group. Error: %s", err)
 		return nil, fmt.Errorf("failed to add OPC group. Error: %s", err)
 	}
-	addItemObject, err := oleutil.GetProperty(opcGrp.ToIDispatch(), "OPCItems")
+	defer func() {
+		opcGrp.ToIDispatch().Release()
+	}()
+
+	itemObject, err := oleutil.GetProperty(opcGrp.ToIDispatch(), "OPCItems")
 	if err != nil {
 		ao.logger.Errorf("cannot get OPC Items. Error: %s", err)
 		return nil, fmt.Errorf("cannot get OPC Items. Error: %s", err)
 	}
 
-	opcGroups.ToIDispatch().Release()
-	opcGrp.ToIDispatch().Release()
-
 	ao.logger.Debug("Connected successfully")
 
-	return NewAutomationItems(addItemObject.ToIDispatch(), ao.logger), nil
+	return NewAutomationItems(itemObject.ToIDispatch(), ao.logger), nil
 }
 
 // TryConnect loops over the nodes array and tries to connect to any of the servers.
@@ -203,7 +207,6 @@ func (ao *AutomationObject) IsConnected() bool {
 // Disconnect checks if connected to server and if so, it calls 'disconnect'
 func (ao *AutomationObject) disconnect() {
 	if ao.IsConnected() {
-		ao.logger.Debug("Disconnecting from server")
 		_, err := oleutil.CallMethod(ao.object, "Disconnect")
 		if err != nil {
 			ao.logger.Errorf("Failed to disconnect. Error: %s", err)
@@ -214,12 +217,30 @@ func (ao *AutomationObject) disconnect() {
 // Close releases the OLE objects in the AutomationObject.
 func (ao *AutomationObject) Close() {
 	ao.logger.Debugf("Closing AutomationObject")
+	ao.removeAllGroups()
+
 	if ao.object != nil {
 		ao.disconnect()
 		ao.object.Release()
 	}
 	if ao.unknown != nil {
 		ao.unknown.Release()
+	}
+}
+
+func (ao *AutomationObject) removeAllGroups() {
+	opcGroups, err := oleutil.GetProperty(ao.object, "OPCGroups")
+	if err != nil {
+		ao.logger.Errorf("failed to get OPC groups property. Error: %s", err)
+		return
+	}
+	defer func() {
+		opcGroups.ToIDispatch().Release()
+	}()
+
+	_, err = oleutil.CallMethod(opcGroups.ToIDispatch(), "RemoveAll")
+	if err != nil {
+		ao.logger.Errorf("failed to remove all OPC groups. Error: %s", err)
 	}
 }
 
@@ -236,9 +257,11 @@ func NewAutomationObject(logger *logrus.Entry) (*AutomationObject, error) {
 
 	opc, err := unknown.QueryInterface(ole.IID_IDispatch)
 	if err != nil {
+		unknown.Release()
 		logger.Errorf("could not QueryInterface IDispatch: %s", err)
 		return nil, fmt.Errorf("could not QueryInterface IDispatch: %s", err)
 	}
+
 	object := &AutomationObject{
 		unknown: unknown,
 		object:  opc,
@@ -250,16 +273,16 @@ func NewAutomationObject(logger *logrus.Entry) (*AutomationObject, error) {
 // AutomationItems store the OPCItems from OPCGroup and does the bookkeeping
 // for the individual OPC items. Tags can added, removed, and read.
 type AutomationItems struct {
-	addItemObject *ole.IDispatch
-	items         map[string]*ole.IDispatch
-	logger        *logrus.Entry
+	itemObject *ole.IDispatch
+	items      map[string]*ole.IDispatch
+	logger     *logrus.Entry
 }
 
 // addSingle adds the tag and returns an error. Client handles are not implemented yet.
 func (ai *AutomationItems) addSingle(tag string) error {
 	ai.logger.Debugf("Adding item tag: %s", tag)
 	clientHandle := int32(1)
-	item, err := oleutil.CallMethod(ai.addItemObject, "AddItem", tag, clientHandle)
+	item, err := oleutil.CallMethod(ai.itemObject, "AddItem", tag, clientHandle)
 	if err != nil {
 		ai.logger.Errorf("failed to add item tag. tag:%s, Error: %s", tag, err)
 		return fmt.Errorf("failed to add item tag. tag:%s, Error: %s", tag, err)
@@ -312,13 +335,19 @@ func ensureInt16(q interface{}) int16 {
 // readFromOPC reads from the server and returns an Item and error.
 func (ai *AutomationItems) readFromOpc(opcitem *ole.IDispatch) (Item, error) {
 	v := ole.NewVariant(ole.VT_R4, 0)
-	defer v.Clear()
+	defer func() {
+		err := v.Clear()
+		if err != nil {
+			ai.logger.Errorf("failed to clear variant: %s", err)
+		}
+	}()
 	q := ole.NewVariant(ole.VT_INT, 0)
 	ts := ole.NewVariant(ole.VT_DATE, 0)
 
 	_, err := oleutil.CallMethod(opcitem, "Read", OPCCache, &v, &q, &ts)
 
 	if err != nil {
+		ai.logger.Errorf("failed to read from opc item. Error: %s", err)
 		return Item{}, err
 	}
 
@@ -337,17 +366,17 @@ func (ai *AutomationItems) Close() {
 			opcitem.Release()
 			delete(ai.items, key)
 		}
-		ai.logger.Debugf("releasing addItemObject")
-		ai.addItemObject.Release()
+		ai.logger.Debugf("releasing itemObject")
+		ai.itemObject.Release()
 	}
 }
 
 // NewAutomationItems returns a new AutomationItems instance.
 func NewAutomationItems(opcitems *ole.IDispatch, logger *logrus.Entry) *AutomationItems {
 	return &AutomationItems{
-		addItemObject: opcitems,
-		items:         make(map[string]*ole.IDispatch),
-		logger:        logger,
+		itemObject: opcitems,
+		items:      make(map[string]*ole.IDispatch),
+		logger:     logger,
 	}
 }
 
@@ -355,8 +384,8 @@ func NewAutomationItems(opcitems *ole.IDispatch, logger *logrus.Entry) *Automati
 // It has the AutomationObject embedded for connecting to the server
 // and an AutomationItems to facilitate the OPC items bookkeeping.
 type opcConnectionImpl struct {
-	*AutomationObject
-	*AutomationItems
+	Object              *AutomationObject
+	Items               *AutomationItems
 	Server              string
 	Nodes               []string
 	mu                  sync.RWMutex
@@ -367,13 +396,21 @@ type opcConnectionImpl struct {
 	addTagRetryInterval time.Duration
 }
 
+func (conn *opcConnectionImpl) Add(s ...string) error {
+	return conn.Items.Add(s...)
+}
+
+func (conn *opcConnectionImpl) Remove(s string) {
+	conn.Items.Remove(s)
+}
+
 // Read returns a map of the values of all added tags.
 func (conn *opcConnectionImpl) Read() map[string]Item {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
 	allTags := make(map[string]Item)
-	for tag, opcitem := range conn.AutomationItems.items {
-		item, err := conn.AutomationItems.readFromOpc(opcitem)
+	for tag, opcitem := range conn.Items.items {
+		item, err := conn.Items.readFromOpc(opcitem)
 		if err != nil {
 			conn.logger.Warnf("Cannot read %s: %s. Trying to fix.", tag, err)
 			conn.fix()
@@ -387,8 +424,8 @@ func (conn *opcConnectionImpl) Read() map[string]Item {
 // Tags returns the currently active tags
 func (conn *opcConnectionImpl) Tags() []string {
 	var tags []string
-	if conn.AutomationItems != nil {
-		for tag, _ := range conn.AutomationItems.items {
+	if conn.Items != nil {
+		for tag := range conn.Items.items {
 			tags = append(tags, tag)
 		}
 	}
@@ -399,7 +436,7 @@ func (conn *opcConnectionImpl) Tags() []string {
 // with AutomationObject and creating a new AutomationItems instance.
 func (conn *opcConnectionImpl) fix() {
 	var err error
-	if !conn.IsConnected() {
+	if !conn.Object.IsConnected() {
 		conn.logger.Warnf("Connection not established. Trying to reconnect.")
 		tags := conn.Tags()
 		reconnected := false
@@ -407,8 +444,8 @@ func (conn *opcConnectionImpl) fix() {
 		for i := 0; i < conn.reconnectTimes; i++ {
 			reconnectTimes++
 			conn.logger.Warnf("Reconnection attempt %d/%d", reconnectTimes, conn.reconnectTimes)
-			conn.AutomationItems.Close()
-			conn.AutomationItems, err = conn.TryConnect(conn.Server, conn.Nodes)
+			conn.Items.Close()
+			conn.Items, err = conn.Object.TryConnect(conn.Server, conn.Nodes)
 			if err != nil {
 				conn.logger.Warnf("try to reconnect failed: %s, will retry in %d millseconds", err, conn.reconnectInterval.Milliseconds())
 				time.Sleep(conn.reconnectInterval)
@@ -432,7 +469,7 @@ func (conn *opcConnectionImpl) reAddTags(tags []string) {
 		conn.logger.Debugf("Re-adding tag %d/%d: %s", i+1, len(tags), tag)
 		reAddSuccess := false
 		for retryTimes := 0; retryTimes < conn.addTagRetryTimes; retryTimes++ {
-			err := conn.addSingle(tag)
+			err := conn.Items.addSingle(tag)
 			if err != nil {
 				if retryTimes == conn.addTagRetryTimes-1 {
 					conn.logger.Errorf("Failed to re-add tag %s after %d retries: %s, giving up", tag, retryTimes, err)
@@ -455,11 +492,11 @@ func (conn *opcConnectionImpl) reAddTags(tags []string) {
 func (conn *opcConnectionImpl) Close() {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
-	if conn.AutomationObject != nil {
-		conn.AutomationObject.Close()
+	if conn.Items != nil {
+		conn.Items.Close()
 	}
-	if conn.AutomationItems != nil {
-		conn.AutomationItems.Close()
+	if conn.Object != nil {
+		conn.Object.Close()
 	}
 }
 
@@ -497,8 +534,8 @@ func NewConnection(server string, nodes []string, tags []string, config *Connect
 		return nil, err
 	}
 	conn := opcConnectionImpl{
-		AutomationObject:    object,
-		AutomationItems:     items,
+		Object:              object,
+		Items:               items,
 		Server:              server,
 		Nodes:               nodes,
 		logger:              logger,
@@ -519,10 +556,11 @@ func CreateBrowser(server string, nodes []string, logger *logrus.Entry) (*Tree, 
 		return nil, err
 	}
 	defer object.Close()
-	_, err = object.TryConnect(server, nodes)
+	items, err := object.TryConnect(server, nodes)
 	if err != nil {
 		logger.Errorf("Cannot connect to %s: %s", server, err)
 		return nil, err
 	}
+	defer items.Close()
 	return object.CreateBrowser()
 }

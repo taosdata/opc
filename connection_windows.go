@@ -64,13 +64,16 @@ func (ao *AutomationObject) CreateBrowser() (*Tree, error) {
 		ao.logger.Errorf("failed to create Browser, err: %s", err)
 		return nil, fmt.Errorf("failed to create Browser, err: %s", err)
 	}
-
+	browserI := browser.ToIDispatch()
+	defer func() {
+		browserI.Release()
+	}()
 	// move to root
-	oleutil.MustCallMethod(browser.ToIDispatch(), "MoveToRoot")
+	oleutil.MustCallMethod(browserI, "MoveToRoot")
 
 	// create tree
 	root := Tree{"root", nil, []*Tree{}, []Leaf{}}
-	buildTree(browser.ToIDispatch(), &root, ao.logger)
+	buildTree(browserI, &root, ao.logger)
 
 	return &root, nil
 }
@@ -82,48 +85,58 @@ func buildTree(browser *ole.IDispatch, branch *Tree, logger *logrus.Entry) {
 	logger.Tracef("Entering branch: %s", branch.Name)
 
 	// loop through leafs
-	oleutil.MustCallMethod(browser, "ShowLeafs").ToIDispatch()
+	oleutil.MustCallMethod(browser, "ShowLeafs")
 	count = oleutil.MustGetProperty(browser, "Count").Value().(int32)
 
 	logger.Tracef("Leafs count:%d", count)
 
 	for i := 1; i <= int(count); i++ {
-
-		item := oleutil.MustCallMethod(browser, "Item", i).Value()
-		tag := oleutil.MustCallMethod(browser, "GetItemID", item).Value()
-
-		l := Leaf{Name: item.(string), Tag: tag.(string)}
+		item := callMethodGetString(logger, browser, "Item", i)
+		tag := callMethodGetString(logger, browser, "GetItemID", item)
+		l := Leaf{Name: item, Tag: tag}
 		logger.Tracef("Item index:%d, Leaf name:%s, tag:%s", i, l.Name, l.Tag)
 
 		branch.Leaves = append(branch.Leaves, l)
 	}
 
 	// loop through branches
-	oleutil.MustCallMethod(browser, "ShowBranches").ToIDispatch()
+	oleutil.MustCallMethod(browser, "ShowBranches")
 	count = oleutil.MustGetProperty(browser, "Count").Value().(int32)
 	logger.Tracef("Branches count:%d", count)
 
 	for i := 1; i <= int(count); i++ {
-
-		nextName := oleutil.MustCallMethod(browser, "Item", i).Value()
-
-		logger.Tracef("Branch index:%d, next branch name:%s", i, nextName.(string))
+		nextName := callMethodGetString(logger, browser, "Item", i)
+		logger.Tracef("Branch index:%d, next branch name:%s", i, nextName)
 
 		// move down
 		oleutil.MustCallMethod(browser, "MoveDown", nextName)
 
 		// recursively populate tree
-		nextBranch := Tree{nextName.(string), branch, []*Tree{}, []Leaf{}}
+		nextBranch := Tree{nextName, branch, []*Tree{}, []Leaf{}}
 		branch.Branches = append(branch.Branches, &nextBranch)
 		buildTree(browser, &nextBranch, logger)
 
 		// move up and set branches again
 		oleutil.MustCallMethod(browser, "MoveUp")
-		oleutil.MustCallMethod(browser, "ShowBranches").ToIDispatch()
+		oleutil.MustCallMethod(browser, "ShowBranches")
 	}
 
 	logger.Tracef("Exiting branch:%s", branch.Name)
+}
 
+func callMethodGetString(logger *logrus.Entry, dispatch *ole.IDispatch, methodName string, params ...interface{}) string {
+	logger.Debugf("Calling method: %s, params: %v", methodName, params)
+	result, err := oleutil.CallMethod(dispatch, methodName, params...)
+	if err != nil {
+		logger.Fatalf("failed to call method: %s, err: %s", methodName, err)
+	}
+	strVal := result.Value().(string)
+	err = result.Clear()
+	if err != nil {
+		// ignore error on clear
+		logger.Errorf("failed to clear variant from method %s: %s", methodName, err)
+	}
+	return strVal
 }
 
 // Connect establishes a connection to the OPC Server on node.
@@ -146,20 +159,22 @@ func (ao *AutomationObject) Connect(server string, node string) (*AutomationItem
 		ao.logger.Errorf("failed to get OPC groups property. Error: %s", err)
 		return nil, fmt.Errorf("failed to get OPC groups property. Error: %s", err)
 	}
+	opcGroupsI := opcGroups.ToIDispatch()
 	defer func() {
-		opcGroups.ToIDispatch().Release()
+		opcGroupsI.Release()
 	}()
 
-	opcGrp, err := oleutil.CallMethod(opcGroups.ToIDispatch(), "Add")
+	opcGroup, err := oleutil.CallMethod(opcGroupsI, "Add")
 	if err != nil {
 		ao.logger.Errorf("failed to add OPC group. Error: %s", err)
 		return nil, fmt.Errorf("failed to add OPC group. Error: %s", err)
 	}
+	opcGroupI := opcGroup.ToIDispatch()
 	defer func() {
-		opcGrp.ToIDispatch().Release()
+		opcGroupI.Release()
 	}()
 
-	itemObject, err := oleutil.GetProperty(opcGrp.ToIDispatch(), "OPCItems")
+	itemObject, err := oleutil.GetProperty(opcGroupI, "OPCItems")
 	if err != nil {
 		ao.logger.Errorf("cannot get OPC Items. Error: %s", err)
 		return nil, fmt.Errorf("cannot get OPC Items. Error: %s", err)
@@ -217,7 +232,6 @@ func (ao *AutomationObject) disconnect() {
 // Close releases the OLE objects in the AutomationObject.
 func (ao *AutomationObject) Close() {
 	ao.logger.Debugf("Closing AutomationObject")
-	ao.removeAllGroups()
 
 	if ao.object != nil {
 		ao.disconnect()
@@ -225,22 +239,6 @@ func (ao *AutomationObject) Close() {
 	}
 	if ao.unknown != nil {
 		ao.unknown.Release()
-	}
-}
-
-func (ao *AutomationObject) removeAllGroups() {
-	opcGroups, err := oleutil.GetProperty(ao.object, "OPCGroups")
-	if err != nil {
-		ao.logger.Errorf("failed to get OPC groups property. Error: %s", err)
-		return
-	}
-	defer func() {
-		opcGroups.ToIDispatch().Release()
-	}()
-
-	_, err = oleutil.CallMethod(opcGroups.ToIDispatch(), "RemoveAll")
-	if err != nil {
-		ao.logger.Errorf("failed to remove all OPC groups. Error: %s", err)
 	}
 }
 
@@ -273,16 +271,16 @@ func NewAutomationObject(logger *logrus.Entry) (*AutomationObject, error) {
 // AutomationItems store the OPCItems from OPCGroup and does the bookkeeping
 // for the individual OPC items. Tags can added, removed, and read.
 type AutomationItems struct {
-	itemObject *ole.IDispatch
-	items      map[string]*ole.IDispatch
-	logger     *logrus.Entry
+	itemI  *ole.IDispatch
+	items  map[string]*ole.IDispatch
+	logger *logrus.Entry
 }
 
 // addSingle adds the tag and returns an error. Client handles are not implemented yet.
 func (ai *AutomationItems) addSingle(tag string) error {
 	ai.logger.Debugf("Adding item tag: %s", tag)
 	clientHandle := int32(1)
-	item, err := oleutil.CallMethod(ai.itemObject, "AddItem", tag, clientHandle)
+	item, err := oleutil.CallMethod(ai.itemI, "AddItem", tag, clientHandle)
 	if err != nil {
 		ai.logger.Errorf("failed to add item tag. tag:%s, Error: %s", tag, err)
 		return fmt.Errorf("failed to add item tag. tag:%s, Error: %s", tag, err)
@@ -345,7 +343,6 @@ func (ai *AutomationItems) readFromOpc(opcitem *ole.IDispatch) (Item, error) {
 	ts := ole.NewVariant(ole.VT_DATE, 0)
 
 	_, err := oleutil.CallMethod(opcitem, "Read", OPCCache, &v, &q, &ts)
-
 	if err != nil {
 		ai.logger.Errorf("failed to read from opc item. Error: %s", err)
 		return Item{}, err
@@ -366,17 +363,17 @@ func (ai *AutomationItems) Close() {
 			opcitem.Release()
 			delete(ai.items, key)
 		}
-		ai.logger.Debugf("releasing itemObject")
-		ai.itemObject.Release()
+		ai.logger.Debugf("releasing itemI")
+		ai.itemI.Release()
 	}
 }
 
 // NewAutomationItems returns a new AutomationItems instance.
-func NewAutomationItems(opcitems *ole.IDispatch, logger *logrus.Entry) *AutomationItems {
+func NewAutomationItems(itemI *ole.IDispatch, logger *logrus.Entry) *AutomationItems {
 	return &AutomationItems{
-		itemObject: opcitems,
-		items:      make(map[string]*ole.IDispatch),
-		logger:     logger,
+		itemI:  itemI,
+		items:  make(map[string]*ole.IDispatch),
+		logger: logger,
 	}
 }
 

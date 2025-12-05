@@ -202,13 +202,13 @@ func TestGetTags(t *testing.T) {
 
 func TestTags(t *testing.T) {
 	var want []string
-	client := &opcConnectionImpl{}
+	client := &OpcConnectionImpl{}
 	tags := client.Tags()
 	assert.Equal(t, want, tags)
 }
 
 func TestAutomationItemsClose(t *testing.T) {
-	conn := &opcConnectionImpl{}
+	conn := &OpcConnectionImpl{}
 	conn.Items.Close()
 }
 
@@ -320,10 +320,10 @@ func TestReconnect(t *testing.T) {
 		testLogger,
 	)
 	assert.NoError(t, err)
-	impl := client.(*opcConnectionImpl)
+	impl := client.(*OpcConnectionImpl)
 	err = KillProcessByName("gb_opcsim.exe")
 	assert.NoError(t, err)
-	impl.fix()
+	impl.Fix(false)
 }
 
 func KillProcessByName(name string) error {

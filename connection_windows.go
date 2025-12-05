@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	DefaultReConnectInterval   = 1 * time.Second
-	DefaultReconnectTimes      = 100
-	DefaultAddTagRetryTimes    = 100
-	DefaultAddTagRetryInterval = 500 * time.Millisecond
+	DefaultReConnectInterval           = 1 * time.Second
+	DefaultReconnectTimes              = 100
+	DefaultAddTagRetryTimes            = 100
+	DefaultAddTagRetryInterval         = 500 * time.Millisecond
+	DefaultFailedReadsToForceReconnect = 50
 )
 
 func init() {
@@ -377,40 +378,50 @@ func NewAutomationItems(itemI *ole.IDispatch, logger *logrus.Entry) *AutomationI
 	}
 }
 
-// opcRealServer implements the Connection interface.
+// OpcConnectionImpl implements the Connection interface.
 // It has the AutomationObject embedded for connecting to the server
 // and an AutomationItems to facilitate the OPC items bookkeeping.
-type opcConnectionImpl struct {
-	Object              *AutomationObject
-	Items               *AutomationItems
-	Server              string
-	Nodes               []string
-	mu                  sync.RWMutex
-	logger              *logrus.Entry
-	reconnectTimes      int
-	addTagRetryTimes    int
-	reconnectInterval   time.Duration
-	addTagRetryInterval time.Duration
+// Exported for testing purpose.
+type OpcConnectionImpl struct {
+	Object                      *AutomationObject
+	Items                       *AutomationItems
+	Server                      string
+	Nodes                       []string
+	mu                          sync.RWMutex
+	logger                      *logrus.Entry
+	reconnectTimes              int
+	addTagRetryTimes            int
+	reconnectInterval           time.Duration
+	addTagRetryInterval         time.Duration
+	failedReadsToForceReconnect int
+
+	readFailedTimes int
 }
 
-func (conn *opcConnectionImpl) Add(s ...string) error {
+func (conn *OpcConnectionImpl) Add(s ...string) error {
 	return conn.Items.Add(s...)
 }
 
-func (conn *opcConnectionImpl) Remove(s string) {
+func (conn *OpcConnectionImpl) Remove(s string) {
 	conn.Items.Remove(s)
 }
 
 // Read returns a map of the values of all added tags.
-func (conn *opcConnectionImpl) Read() map[string]Item {
+func (conn *OpcConnectionImpl) Read() map[string]Item {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
 	allTags := make(map[string]Item)
 	for tag, opcitem := range conn.Items.items {
 		item, err := conn.Items.readFromOpc(tag, opcitem)
 		if err != nil {
-			conn.logger.Warnf("Cannot read %s: %s. Trying to fix.", tag, err)
-			conn.fix()
+			conn.readFailedTimes += 1
+			conn.logger.Errorf("Cannot read %s: %s. Total Failed count: %d, Trying to fix.", tag, err, conn.readFailedTimes)
+			if conn.readFailedTimes >= conn.failedReadsToForceReconnect {
+				conn.logger.Warnf("Read failed %d times, force reconnect.", conn.readFailedTimes)
+				conn.Fix(true)
+			} else {
+				conn.Fix(false)
+			}
 			continue
 		}
 		allTags[tag] = item
@@ -419,7 +430,7 @@ func (conn *opcConnectionImpl) Read() map[string]Item {
 }
 
 // Tags returns the currently active tags
-func (conn *opcConnectionImpl) Tags() []string {
+func (conn *OpcConnectionImpl) Tags() []string {
 	var tags []string
 	if conn.Items != nil {
 		for tag := range conn.Items.items {
@@ -429,11 +440,12 @@ func (conn *opcConnectionImpl) Tags() []string {
 	return tags
 }
 
-// fix tries to reconnect if connection is lost by creating a new connection
+// Fix tries to reconnect if connection is lost by creating a new connection
 // with AutomationObject and creating a new AutomationItems instance.
-func (conn *opcConnectionImpl) fix() {
+// Exported for testing purpose.
+func (conn *OpcConnectionImpl) Fix(force bool) {
 	var err error
-	if !conn.Object.IsConnected() {
+	if force || !conn.Object.IsConnected() {
 		conn.logger.Warnf("Connection not established. Trying to reconnect.")
 		tags := conn.Tags()
 		reconnected := false
@@ -457,11 +469,15 @@ func (conn *opcConnectionImpl) fix() {
 		if !reconnected {
 			conn.logger.Panic("Could not reconnect to server, aborting fix.")
 		}
+		conn.logger.Infof("cleaned up readFailedTimes after successful reconnection.")
+		conn.readFailedTimes = 0
+	} else {
+		conn.logger.Warnf("Connection is established, but read failed. No fix action taken.")
 	}
 }
 
 // reAddTags tries to re-add the tags after reconnection
-func (conn *opcConnectionImpl) reAddTags(tags []string) {
+func (conn *OpcConnectionImpl) reAddTags(tags []string) {
 	for i, tag := range tags {
 		conn.logger.Debugf("Re-adding tag %d/%d: %s", i+1, len(tags), tag)
 		reAddSuccess := false
@@ -486,7 +502,7 @@ func (conn *opcConnectionImpl) reAddTags(tags []string) {
 }
 
 // Close closes the embedded types.
-func (conn *opcConnectionImpl) Close() {
+func (conn *OpcConnectionImpl) Close() {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
 	if conn.Items != nil {
@@ -498,18 +514,20 @@ func (conn *opcConnectionImpl) Close() {
 }
 
 type ConnectionConfig struct {
-	ReconnectTimes      int
-	ReconnectInterval   time.Duration
-	AddTagRetryTimes    int
-	AddTagRetryInterval time.Duration
+	ReconnectTimes              int
+	ReconnectInterval           time.Duration
+	AddTagRetryTimes            int
+	AddTagRetryInterval         time.Duration
+	FailedReadsToForceReconnect int
 }
 
 func DefaultConnectionConfig() *ConnectionConfig {
 	return &ConnectionConfig{
-		ReconnectTimes:      DefaultReconnectTimes,
-		ReconnectInterval:   DefaultReConnectInterval,
-		AddTagRetryTimes:    DefaultAddTagRetryTimes,
-		AddTagRetryInterval: DefaultAddTagRetryInterval,
+		ReconnectTimes:              DefaultReconnectTimes,
+		ReconnectInterval:           DefaultReConnectInterval,
+		AddTagRetryTimes:            DefaultAddTagRetryTimes,
+		AddTagRetryInterval:         DefaultAddTagRetryInterval,
+		FailedReadsToForceReconnect: DefaultFailedReadsToForceReconnect,
 	}
 }
 
@@ -530,16 +548,17 @@ func NewConnection(server string, nodes []string, tags []string, config *Connect
 		object.Close()
 		return nil, err
 	}
-	conn := opcConnectionImpl{
-		Object:              object,
-		Items:               items,
-		Server:              server,
-		Nodes:               nodes,
-		logger:              logger,
-		reconnectTimes:      config.ReconnectTimes,
-		reconnectInterval:   config.ReconnectInterval,
-		addTagRetryTimes:    config.AddTagRetryTimes,
-		addTagRetryInterval: config.AddTagRetryInterval,
+	conn := OpcConnectionImpl{
+		Object:                      object,
+		Items:                       items,
+		Server:                      server,
+		Nodes:                       nodes,
+		logger:                      logger,
+		reconnectTimes:              config.ReconnectTimes,
+		reconnectInterval:           config.ReconnectInterval,
+		addTagRetryTimes:            config.AddTagRetryTimes,
+		addTagRetryInterval:         config.AddTagRetryInterval,
+		failedReadsToForceReconnect: config.FailedReadsToForceReconnect,
 	}
 
 	return &conn, nil

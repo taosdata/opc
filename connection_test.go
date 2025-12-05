@@ -213,10 +213,22 @@ func TestAutomationItemsClose(t *testing.T) {
 }
 
 func TestOpcRead(t *testing.T) {
+	points := []string{
+		"numeric.triangle.int8",
+		"numeric.triangle.int16",
+		"numeric.triangle.int32",
+		"numeric.triangle.int64",
+		"numeric.triangle.uint8",
+		"numeric.triangle.uint16",
+		"numeric.triangle.uint32",
+		"numeric.triangle.uint64",
+		"numeric.triangle.float",
+		"numeric.triangle.double",
+	}
 	client, _ := NewConnection(
 		"Graybox.Simulator",
 		[]string{"localhost"},
-		[]string{"numeric.sin.int64", "numeric.saw.float"},
+		points,
 		connConfig,
 		testLogger,
 	)
@@ -226,10 +238,7 @@ func TestOpcRead(t *testing.T) {
 	var m map[string]Item
 	for i := 0; i < 10; i++ {
 		m = client.Read()
-		assert.Equal(t, 2, len(m))
-		if len(m) != 2 {
-			t.Fatal("the map should have only two items")
-		}
+		assert.Equal(t, len(points), len(m))
 		quality := int16(0)
 		for _, item := range m {
 			quality |= item.Quality
@@ -241,8 +250,11 @@ func TestOpcRead(t *testing.T) {
 		}
 		break
 	}
-
-	keys := map[string]struct{}{"numeric.sin.int64": {}, "numeric.saw.float": {}}
+	// check all points are read
+	keys := make(map[string]struct{}, len(points))
+	for i := 0; i < len(points); i++ {
+		keys[points[i]] = struct{}{}
+	}
 	for key, item := range m {
 		assert.NotNil(t, item.Value)
 		assert.Contains(t, keys, key)
@@ -251,6 +263,32 @@ func TestOpcRead(t *testing.T) {
 		assert.Equal(t, int16(192), item.Quality)
 	}
 	assert.Equal(t, 0, len(keys))
+	t.Logf("%T", m["numeric.triangle.int8"].Value)
+	t.Logf("%T", m["numeric.triangle.int16"].Value)
+	t.Logf("%T", m["numeric.triangle.int32"].Value)
+	t.Logf("%T", m["numeric.triangle.int64"].Value)
+	t.Logf("%T", m["numeric.triangle.uint8"].Value)
+	t.Logf("%T", m["numeric.triangle.uint16"].Value)
+	t.Logf("%T", m["numeric.triangle.uint32"].Value)
+	t.Logf("%T", m["numeric.triangle.uint64"].Value)
+	intVal := m["numeric.triangle.int8"].Value.(int16)
+	assert.NotEqual(t, int16(0), intVal)
+	uintVal := m["numeric.triangle.uint8"].Value.(uint8)
+	assert.NotEqual(t, uint8(0), uintVal)
+	floatVal := m["numeric.triangle.float"].Value.(float32)
+	assert.NotEqual(t, float32(0), floatVal)
+	doubleVal := m["numeric.triangle.double"].Value.(float64)
+	assert.NotEqual(t, float64(0), doubleVal)
+	t.Logf("int8: %d, uint8: %d, float: %f, double: %f", intVal, uintVal, floatVal, doubleVal)
+	assert.InDelta(t, float64(floatVal), doubleVal, 0.0001)
+	//int val
+	assert.Equal(t, int16(intVal), m["numeric.triangle.int16"].Value.(int16))
+	assert.Equal(t, int32(intVal), m["numeric.triangle.int32"].Value.(int32))
+	assert.Equal(t, int64(intVal), m["numeric.triangle.int64"].Value.(int64))
+	//uint val
+	assert.Equal(t, int32(uintVal), m["numeric.triangle.uint16"].Value.(int32))
+	assert.Equal(t, float64(uintVal), m["numeric.triangle.uint32"].Value.(float64))
+	assert.Equal(t, uint64(uintVal), m["numeric.triangle.uint64"].Value.(uint64))
 }
 
 func Test_ensureInt16(t *testing.T) {

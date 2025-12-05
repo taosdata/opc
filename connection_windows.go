@@ -331,12 +331,12 @@ func ensureInt16(q interface{}) int16 {
 }
 
 // readFromOPC reads from the server and returns an Item and error.
-func (ai *AutomationItems) readFromOpc(opcitem *ole.IDispatch) (Item, error) {
+func (ai *AutomationItems) readFromOpc(tag string, opcitem *ole.IDispatch) (Item, error) {
 	v := ole.NewVariant(ole.VT_R4, 0)
 	defer func() {
 		err := v.Clear()
 		if err != nil {
-			ai.logger.Errorf("failed to clear variant: %s", err)
+			ai.logger.Errorf("failed to clear variant: %s,tag:%s", err, tag)
 		}
 	}()
 	q := ole.NewVariant(ole.VT_INT, 0)
@@ -344,7 +344,7 @@ func (ai *AutomationItems) readFromOpc(opcitem *ole.IDispatch) (Item, error) {
 
 	_, err := oleutil.CallMethod(opcitem, "Read", OPCCache, &v, &q, &ts)
 	if err != nil {
-		ai.logger.Errorf("failed to read from opc item. Error: %s", err)
+		ai.logger.Errorf("failed to read from opc item. Error: %s,tag: %s", err, tag)
 		return Item{}, err
 	}
 
@@ -407,7 +407,7 @@ func (conn *opcConnectionImpl) Read() map[string]Item {
 	defer conn.mu.Unlock()
 	allTags := make(map[string]Item)
 	for tag, opcitem := range conn.Items.items {
-		item, err := conn.Items.readFromOpc(opcitem)
+		item, err := conn.Items.readFromOpc(tag, opcitem)
 		if err != nil {
 			conn.logger.Warnf("Cannot read %s: %s. Trying to fix.", tag, err)
 			conn.fix()

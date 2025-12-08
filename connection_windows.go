@@ -272,9 +272,10 @@ func NewAutomationObject(logger *logrus.Entry) (*AutomationObject, error) {
 // AutomationItems store the OPCItems from OPCGroup and does the bookkeeping
 // for the individual OPC items. Tags can added, removed, and read.
 type AutomationItems struct {
-	itemI  *ole.IDispatch
-	items  map[string]*ole.IDispatch
-	logger *logrus.Entry
+	itemI     *ole.IDispatch
+	items     map[string]*ole.IDispatch
+	cacheTags []string
+	logger    *logrus.Entry
 }
 
 // addSingle adds the tag and returns an error. Client handles are not implemented yet.
@@ -293,6 +294,7 @@ func (ai *AutomationItems) addSingle(tag string) error {
 
 // Add accepts a variadic parameters of tags.
 func (ai *AutomationItems) Add(tags ...string) error {
+	defer ai.updateCacheTags()
 	var errorList []error
 	for _, tag := range tags {
 		err := ai.addSingle(tag)
@@ -308,6 +310,7 @@ func (ai *AutomationItems) Add(tags ...string) error {
 
 // Remove removes the tag.
 func (ai *AutomationItems) Remove(tag string) {
+	defer ai.updateCacheTags()
 	ai.logger.Debugf("removing item tag: %s", tag)
 	item, ok := ai.items[tag]
 	if ok {
@@ -315,6 +318,14 @@ func (ai *AutomationItems) Remove(tag string) {
 		item.Release()
 	}
 	delete(ai.items, tag)
+}
+
+func (ai *AutomationItems) updateCacheTags() {
+	cacheTags := make([]string, 0, len(ai.cacheTags))
+	for key := range ai.items {
+		cacheTags = append(cacheTags, key)
+	}
+	ai.cacheTags = cacheTags
 }
 
 /*
@@ -411,8 +422,11 @@ func (conn *OpcConnectionImpl) Read() map[string]Item {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
 	allTags := make(map[string]Item)
-	for tag, opcitem := range conn.Items.items {
-		item, err := conn.Items.readFromOpc(tag, opcitem)
+	tags := conn.Items.cacheTags
+	for i := 0; i < len(tags); i++ {
+		tag := tags[i]
+		opcItem := conn.Items.items[tag]
+		item, err := conn.Items.readFromOpc(tag, opcItem)
 		if err != nil {
 			conn.readFailedTimes += 1
 			conn.logger.Errorf("Cannot read %s: %s. Total Failed count: %d, Trying to fix.", tag, err, conn.readFailedTimes)
@@ -463,6 +477,7 @@ func (conn *OpcConnectionImpl) Fix(force bool) {
 			conn.logger.Info("Successfully reconnected to server, adding tags back.")
 			conn.reAddTags(tags)
 			conn.logger.Info("readd tags back successful after reconnection.")
+			conn.Items.updateCacheTags()
 			reconnected = true
 			break
 		}

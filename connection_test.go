@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"testing"
 	"time"
 
@@ -333,4 +334,139 @@ func KillProcessByName(name string) error {
 		return fmt.Errorf("taskkill failed: %v: %s", err, string(out))
 	}
 	return nil
+}
+
+func TestReconnectForce(t *testing.T) {
+	connConfig := DefaultConnectionConfig()
+	connConfig.FailedReadsToForceReconnect = 1
+	client, err := NewConnection(
+		"Graybox.Simulator",
+		[]string{"localhost"},
+		[]string{"numeric.sin.int64", "numeric.saw.float"},
+		connConfig,
+		testLogger,
+	)
+	defer client.Close()
+	assert.NoError(t, err)
+	err = KillProcessByName("gb_opcsim.exe")
+	assert.NoError(t, err)
+	values := client.Read()
+	assert.Equal(t, 1, len(values))
+	time.Sleep(time.Second * 2)
+	values = client.Read()
+	assert.Equal(t, 2, len(values))
+}
+
+func TestCacheTags(t *testing.T) {
+	points := []string{
+		"numeric.triangle.int8",
+		"numeric.triangle.int16",
+		"numeric.triangle.int32",
+		"numeric.triangle.int64",
+		"numeric.triangle.uint8",
+		"numeric.triangle.uint16",
+		"numeric.triangle.uint32",
+		"numeric.triangle.uint64",
+		"numeric.triangle.float",
+		"numeric.triangle.double",
+	}
+	sort.Strings(points)
+	client, _ := NewConnection(
+		"Graybox.Simulator",
+		[]string{"localhost"},
+		points,
+		connConfig,
+		testLogger,
+	)
+	defer client.Close()
+	// read all added tags (items)
+	values := client.Read()
+	assert.Equal(t, len(points), len(values))
+
+	// remove tag
+	client.Remove("numeric.triangle.int8")
+	tags := client.Tags()
+	assert.Equal(t, len(points)-1, len(tags))
+	wantRemoveTags := make([]string, 0, len(points)-1)
+	for _, tag := range points {
+		if tag != "numeric.triangle.int8" {
+			wantRemoveTags = append(wantRemoveTags, tag)
+		}
+	}
+	sort.Strings(wantRemoveTags)
+	sort.Strings(tags)
+	assert.Equal(t, wantRemoveTags, tags)
+	// read all added tags (items)
+	values = client.Read()
+	assert.Equal(t, len(points)-1, len(values))
+	gotTags := make([]string, 0, len(values)-1)
+	for tag := range values {
+		gotTags = append(gotTags, tag)
+	}
+	sort.Strings(gotTags)
+	assert.Equal(t, wantRemoveTags, gotTags)
+	// add tag back
+	err := client.Add("numeric.triangle.int8")
+	assert.NoError(t, err)
+	tags = client.Tags()
+	assert.Equal(t, len(points), len(tags))
+	sort.Strings(tags)
+	assert.Equal(t, points, tags)
+	// read all added tags (items)
+	values = client.Read()
+	assert.Equal(t, len(points), len(values))
+	gotTags = make([]string, 0, len(values))
+	for tag := range values {
+		gotTags = append(gotTags, tag)
+	}
+	sort.Strings(gotTags)
+	assert.Equal(t, points, gotTags)
+	// remove tag again
+	client.Remove("numeric.triangle.int8")
+	tags = client.Tags()
+	sort.Strings(tags)
+	assert.Equal(t, wantRemoveTags, tags)
+	// read all added tags (items)
+	values = client.Read()
+	assert.Equal(t, len(points)-1, len(values))
+	gotTags = make([]string, 0, len(values)-1)
+	for tag := range values {
+		gotTags = append(gotTags, tag)
+	}
+	sort.Strings(gotTags)
+	assert.Equal(t, wantRemoveTags, gotTags)
+	// reconnect
+	err = KillProcessByName("gb_opcsim.exe")
+	assert.NoError(t, err)
+	values = client.Read()
+	assert.Equal(t, len(points)-2, len(values))
+	values = client.Read()
+	assert.Equal(t, len(points)-1, len(values))
+	gotTags = make([]string, 0, len(values)-1)
+	for tag := range values {
+		gotTags = append(gotTags, tag)
+	}
+	sort.Strings(gotTags)
+	assert.Equal(t, wantRemoveTags, gotTags)
+	// add tag back
+	err = client.Add("numeric.triangle.int8")
+	assert.NoError(t, err)
+	tags = client.Tags()
+	assert.Equal(t, len(points), len(tags))
+	sort.Strings(tags)
+	assert.Equal(t, points, tags)
+	// read all added tags (items)
+	values = client.Read()
+	// finally, check tags
+	valueTags := make([]string, 0, len(values))
+	for tag := range values {
+		valueTags = append(valueTags, tag)
+	}
+	sort.Strings(valueTags)
+	assert.Equal(t, points, valueTags)
+	// get tags
+	tags = client.Tags()
+	assert.Equal(t, len(points), len(tags))
+	sort.Strings(tags)
+	assert.Equal(t, points, tags)
 }

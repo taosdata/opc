@@ -356,9 +356,9 @@ func ensureInt16(q interface{}) int16 {
 func (ai *AutomationItems) readFromOpc(tag string, opcitem *ole.IDispatch) (Item, error) {
 	v := ole.NewVariant(ole.VT_R4, 0)
 	defer func() {
-		err := v.Clear()
-		if err != nil {
-			ai.logger.Errorf("failed to clear variant: %s,tag:%s", err, tag)
+		clearErr := v.Clear()
+		if clearErr != nil {
+			ai.logger.Errorf("failed to clear variant: %s,tag: %s", clearErr, tag)
 		}
 	}()
 	q := ole.NewVariant(ole.VT_INT, 0)
@@ -470,10 +470,11 @@ func (conn *OpcConnectionImpl) Tags() []string {
 func (conn *OpcConnectionImpl) Fix(force bool) {
 	var err error
 	if force || !conn.Object.IsConnected() {
-		conn.logger.Warnf("Connection not established. Trying to reconnect.")
+		conn.logger.Warnf("[RECONNECT] Trying to reconnect.")
 		tags := conn.Items.Tags()
 		reconnected := false
 		reconnectTimes := 0
+		reconnectStartTime := time.Now()
 		for i := 0; i < conn.reconnectTimes; i++ {
 			reconnectTimes++
 			conn.logger.Warnf("Reconnection attempt %d/%d", reconnectTimes, conn.reconnectTimes)
@@ -485,24 +486,35 @@ func (conn *OpcConnectionImpl) Fix(force bool) {
 				continue
 			}
 			conn.logger.Info("Successfully reconnected to server, adding tags back.")
-			conn.reAddTags(tags)
-			conn.logger.Info("readd tags back successful after reconnection.")
-			conn.Items.updateCacheTags()
-			reconnected = true
-			break
+			reAddTagStartTime := time.Now()
+			addTagsSuccess := conn.reAddTags(tags)
+			if addTagsSuccess {
+				// re-adding tags successful, break
+				conn.logger.Infof("readd tags back successful after reconnection, cost: %d us.", time.Since(reAddTagStartTime).Microseconds())
+				conn.Items.updateCacheTags()
+				reconnected = true
+				break
+			} else {
+				// re-adding tags failed, panic
+				conn.logger.Errorf("[RECONNECT] Reconnection failed after %d attempts, due to re-adding tags failed, total cost time: %d us.", reconnectTimes, time.Since(reconnectStartTime).Microseconds())
+				conn.logger.Panic("re-adding tags failed after reconnection, aborting fix.")
+			}
 		}
 		if !reconnected {
+			// reconnect failed after max retries
+			conn.logger.Errorf("[RECONNECT] Reconnection failed after %d attempts, total cost time: %d us.", reconnectTimes, time.Since(reconnectStartTime).Microseconds())
 			conn.logger.Panic("Could not reconnect to server, aborting fix.")
 		}
-		conn.logger.Infof("cleaned up readFailedTimes after successful reconnection.")
+		conn.logger.Infof("[RECONNECT] Reconnection successful after %d attempts, total cost time: %d us.", reconnectTimes, time.Since(reconnectStartTime).Microseconds())
+		conn.logger.Debug("cleaned up readFailedTimes after successful reconnection.")
 		conn.readFailedTimes = 0
 	} else {
-		conn.logger.Warnf("Connection is established, but read failed. No fix action taken.")
+		conn.logger.Warnf("Connection is established. No fix action taken.")
 	}
 }
 
 // reAddTags tries to re-add the tags after reconnection
-func (conn *OpcConnectionImpl) reAddTags(tags []string) {
+func (conn *OpcConnectionImpl) reAddTags(tags []string) bool {
 	for i, tag := range tags {
 		conn.logger.Debugf("Re-adding tag %d/%d: %s", i+1, len(tags), tag)
 		reAddSuccess := false
@@ -521,9 +533,11 @@ func (conn *OpcConnectionImpl) reAddTags(tags []string) {
 			}
 		}
 		if !reAddSuccess {
-			conn.logger.Panic("Could not re-add all tags, aborting fix.")
+			conn.logger.Errorf("[RECONNECT] Could not re-add tag: %s", tag)
+			return false
 		}
 	}
+	return true
 }
 
 // Close closes the embedded types.

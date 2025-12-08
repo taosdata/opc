@@ -129,7 +129,7 @@ func callMethodGetString(logger *logrus.Entry, dispatch *ole.IDispatch, methodNa
 	logger.Debugf("Calling method: %s, params: %v", methodName, params)
 	result, err := oleutil.CallMethod(dispatch, methodName, params...)
 	if err != nil {
-		logger.Fatalf("failed to call method: %s, err: %s", methodName, err)
+		logger.Panicf("failed to call method: %s, err: %s", methodName, err)
 	}
 	strVal := result.Value().(string)
 	err = result.Clear()
@@ -320,6 +320,16 @@ func (ai *AutomationItems) Remove(tag string) {
 	delete(ai.items, tag)
 }
 
+func (ai *AutomationItems) Tags() []string {
+	var tags []string
+	if ai != nil {
+		for tag := range ai.items {
+			tags = append(tags, tag)
+		}
+	}
+	return tags
+}
+
 func (ai *AutomationItems) updateCacheTags() {
 	cacheTags := make([]string, 0, len(ai.cacheTags))
 	for key := range ai.items {
@@ -410,10 +420,14 @@ type OpcConnectionImpl struct {
 }
 
 func (conn *OpcConnectionImpl) Add(s ...string) error {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
 	return conn.Items.Add(s...)
 }
 
 func (conn *OpcConnectionImpl) Remove(s string) {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
 	conn.Items.Remove(s)
 }
 
@@ -445,13 +459,9 @@ func (conn *OpcConnectionImpl) Read() map[string]Item {
 
 // Tags returns the currently active tags
 func (conn *OpcConnectionImpl) Tags() []string {
-	var tags []string
-	if conn.Items != nil {
-		for tag := range conn.Items.items {
-			tags = append(tags, tag)
-		}
-	}
-	return tags
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	return conn.Items.Tags()
 }
 
 // Fix tries to reconnect if connection is lost by creating a new connection
@@ -461,7 +471,7 @@ func (conn *OpcConnectionImpl) Fix(force bool) {
 	var err error
 	if force || !conn.Object.IsConnected() {
 		conn.logger.Warnf("Connection not established. Trying to reconnect.")
-		tags := conn.Tags()
+		tags := conn.Items.Tags()
 		reconnected := false
 		reconnectTimes := 0
 		for i := 0; i < conn.reconnectTimes; i++ {

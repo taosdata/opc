@@ -1,6 +1,6 @@
 module github.com/konimarti/opc
 
-go 1.19
+go 1.20
 
 require (
 	github.com/go-ole/go-ole v1.3.1-0.20231030194427-12e70eba63a1

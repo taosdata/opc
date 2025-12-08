@@ -346,6 +346,7 @@ func TestReconnectForce(t *testing.T) {
 		connConfig,
 		testLogger,
 	)
+	assert.NoError(t, err)
 	defer client.Close()
 	assert.NoError(t, err)
 	err = KillProcessByName("gb_opcsim.exe")

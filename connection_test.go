@@ -471,3 +471,26 @@ func TestCacheTags(t *testing.T) {
 	sort.Strings(tags)
 	assert.Equal(t, points, tags)
 }
+
+func TestAddInvalidTag(t *testing.T) {
+	client, err := NewConnection(
+		"Graybox.Simulator",
+		[]string{"localhost"},
+		[]string{"wrong id", "wrong/id", ""},
+		connConfig,
+		testLogger,
+	)
+	assert.Error(t, err)
+	assert.Nil(t, client)
+	client, err = NewConnection(
+		"Graybox.Simulator",
+		[]string{"localhost"},
+		nil,
+		connConfig,
+		testLogger,
+	)
+	assert.NoError(t, err)
+	defer client.Close()
+	err = client.Add("wrong id", "wrong/id", "")
+	assert.Error(t, err)
+}

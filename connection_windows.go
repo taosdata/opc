@@ -62,6 +62,7 @@ func (ao *AutomationObject) CreateBrowser() (*Tree, error) {
 	// create browser
 	browser, err := oleutil.CallMethod(ao.object, "CreateBrowser")
 	if err != nil {
+		err = TryGetOPCError(err)
 		ao.logger.Errorf("failed to create Browser, err: %s", err)
 		return nil, fmt.Errorf("failed to create Browser, err: %s", err)
 	}
@@ -129,6 +130,7 @@ func callMethodGetString(logger *logrus.Entry, dispatch *ole.IDispatch, methodNa
 	logger.Debugf("Calling method: %s, params: %v", methodName, params)
 	result, err := oleutil.CallMethod(dispatch, methodName, params...)
 	if err != nil {
+		err = TryGetOPCError(err)
 		logger.Panicf("failed to call method: %s, err: %s", methodName, err)
 	}
 	strVal := result.Value().(string)
@@ -150,6 +152,7 @@ func (ao *AutomationObject) Connect(server string, node string) (*AutomationItem
 	ao.logger.Debugf("Connecting to %s on node %s", server, node)
 	_, err := oleutil.CallMethod(ao.object, "Connect", server, node)
 	if err != nil {
+		err = TryGetOPCError(err)
 		ao.logger.Errorf("connection failed. Error: %s", err)
 		return nil, fmt.Errorf("connection failed. Error: %s", err)
 	}
@@ -157,6 +160,7 @@ func (ao *AutomationObject) Connect(server string, node string) (*AutomationItem
 	// set up opc groups and items
 	opcGroups, err := oleutil.GetProperty(ao.object, "OPCGroups")
 	if err != nil {
+		err = TryGetOPCError(err)
 		ao.logger.Errorf("failed to get OPC groups property. Error: %s", err)
 		return nil, fmt.Errorf("failed to get OPC groups property. Error: %s", err)
 	}
@@ -167,6 +171,7 @@ func (ao *AutomationObject) Connect(server string, node string) (*AutomationItem
 
 	opcGroup, err := oleutil.CallMethod(opcGroupsI, "Add")
 	if err != nil {
+		err = TryGetOPCError(err)
 		ao.logger.Errorf("failed to add OPC group. Error: %s", err)
 		return nil, fmt.Errorf("failed to add OPC group. Error: %s", err)
 	}
@@ -177,6 +182,7 @@ func (ao *AutomationObject) Connect(server string, node string) (*AutomationItem
 
 	itemObject, err := oleutil.GetProperty(opcGroupI, "OPCItems")
 	if err != nil {
+		err = TryGetOPCError(err)
 		ao.logger.Errorf("cannot get OPC Items. Error: %s", err)
 		return nil, fmt.Errorf("cannot get OPC Items. Error: %s", err)
 	}
@@ -207,6 +213,7 @@ func (ao *AutomationObject) IsConnected() bool {
 	}
 	stateVt, err := oleutil.GetProperty(ao.object, "ServerState")
 	if err != nil {
+		err = TryGetOPCError(err)
 		ao.logger.Warnf("GetProperty call for ServerState failed, err:%s", err)
 		return false
 	}
@@ -225,6 +232,7 @@ func (ao *AutomationObject) disconnect() {
 	if ao.IsConnected() {
 		_, err := oleutil.CallMethod(ao.object, "Disconnect")
 		if err != nil {
+			err = TryGetOPCError(err)
 			ao.logger.Errorf("Failed to disconnect. Error: %s", err)
 		}
 	}
@@ -284,6 +292,7 @@ func (ai *AutomationItems) addSingle(tag string) error {
 	clientHandle := int32(1)
 	item, err := oleutil.CallMethod(ai.itemI, "AddItem", tag, clientHandle)
 	if err != nil {
+		err = TryGetOPCError(err)
 		ai.logger.Errorf("failed to add item tag. tag:%s, Error: %s", tag, err)
 		return fmt.Errorf("failed to add item tag. tag:%s, Error: %s", tag, err)
 	}
@@ -366,6 +375,7 @@ func (ai *AutomationItems) readFromOpc(tag string, opcitem *ole.IDispatch) (Item
 
 	_, err := oleutil.CallMethod(opcitem, "Read", OPCCache, &v, &q, &ts)
 	if err != nil {
+		err = TryGetOPCError(err)
 		ai.logger.Errorf("failed to read from opc item. Error: %s,tag: %s", err, tag)
 		return Item{}, err
 	}
@@ -518,10 +528,10 @@ func (conn *OpcConnectionImpl) reAddTags(tags []string) bool {
 	for i, tag := range tags {
 		conn.logger.Debugf("Re-adding tag %d/%d: %s", i+1, len(tags), tag)
 		reAddSuccess := false
-		for retryTimes := 0; retryTimes < conn.addTagRetryTimes; retryTimes++ {
+		for retryTimes := 1; retryTimes <= conn.addTagRetryTimes; retryTimes++ {
 			err := conn.Items.addSingle(tag)
 			if err != nil {
-				if retryTimes == conn.addTagRetryTimes-1 {
+				if retryTimes == conn.addTagRetryTimes {
 					conn.logger.Errorf("Failed to re-add tag %s after %d retries: %s, giving up", tag, retryTimes, err)
 					break
 				}

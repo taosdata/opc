@@ -1,0 +1,53 @@
+name: test.yml
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        go: [ '1.20' , 'stable' ]
+
+    name: opc_test ${{ matrix.go }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: go.sum
+
+      - name: download dll
+        run: |
+          Start-BitsTransfer -Source https://github.com/huskar-t/opcdatest/releases/download/simulation/gbda_aut.dll
+          cp gbda_aut.dll C:\Windows\SysWOW64
+
+      - name: register
+        run: C:\Windows\SysWOW64\regsvr32.exe C:\Windows\SysWOW64\gbda_aut.dll
+
+      - name: install da simulator
+        run: |
+          Start-BitsTransfer -Source https://github.com/huskar-t/opcdatest/releases/download/simulation/gbopcsim18.msi
+          msiexec /norestart /quiet /i "gbopcsim18.msi"
+
+      - name: Test OPCDA
+        env:
+          GOARCH: 386
+        run: go test -v --count=1 ./...
+
+  golangci:
+    name: lint
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
